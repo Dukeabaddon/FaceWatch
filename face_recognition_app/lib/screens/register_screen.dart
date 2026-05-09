@@ -30,6 +30,7 @@ class _RegisterScreenState extends State<RegisterScreen>
   List<CameraDescription> _cameras = [];
   int _cameraIndex = 0;
   List<Face> _faces = [];
+  Size _imageSize = Size.zero;
   bool _isProcessing = false;
   bool _cameraReady = false;
   bool _isSwitchingCamera = false;
@@ -128,11 +129,13 @@ class _RegisterScreenState extends State<RegisterScreen>
 
       debugPrint('[FaceDetect] faces=${faces.length} img=${image.width}x${image.height}');
 
+      final sensorSize = Size(image.width.toDouble(), image.height.toDouble());
       final state = _evaluateFaceState(faces, image);
 
       setState(() {
         _faces = faces;
         _faceState = state;
+        _imageSize = sensorSize;
       });
 
       if (state == _FaceState.good) {
@@ -420,10 +423,12 @@ class _RegisterScreenState extends State<RegisterScreen>
                         builder: (context, child) => CustomPaint(
                           painter: FaceMeshPainter(
                             faces: _faces,
-                            imageSize: Size(
-                              _cameraController!.value.previewSize!.width,
-                              _cameraController!.value.previewSize!.height,
-                            ),
+                            imageSize: _imageSize != Size.zero
+                                ? _imageSize
+                                : Size(
+                                    _cameraController!.value.previewSize!.height,
+                                    _cameraController!.value.previewSize!.width,
+                                  ),
                             isFrontCamera: _cameraController!
                                     .description.lensDirection ==
                                 CameraLensDirection.front,

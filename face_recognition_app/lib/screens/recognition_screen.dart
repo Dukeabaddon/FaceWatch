@@ -31,6 +31,7 @@ class _RecognitionScreenState extends State<RecognitionScreen>
   // ignore: prefer_final_fields
   DeviceOrientation _deviceOrientation = DeviceOrientation.portraitUp;
 
+  Size _imageSize = Size.zero;
   List<Face> _faces = [];
   List<String?> _labels = [];
   bool _isProcessing = false;
@@ -111,9 +112,10 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       if (inputImage == null) return;
 
       final faces = await _detectorService.detectFacesWithContours(inputImage);
+      final sensorSize = Size(image.width.toDouble(), image.height.toDouble());
 
       if (faces.isEmpty) {
-        if (mounted) setState(() { _faces = []; _labels = []; });
+        if (mounted) setState(() { _faces = []; _labels = []; _imageSize = sensorSize; });
         return;
       }
 
@@ -161,6 +163,7 @@ class _RecognitionScreenState extends State<RecognitionScreen>
         setState(() {
           _faces = faces;
           _labels = labels;
+          _imageSize = sensorSize;
         });
         _triggerFeedback(labels);
       }
@@ -285,10 +288,12 @@ class _RecognitionScreenState extends State<RecognitionScreen>
               builder: (context, child) => CustomPaint(
                 painter: FaceMeshPainter(
                   faces: _faces,
-                  imageSize: Size(
-                    _cameraController!.value.previewSize!.width,
-                    _cameraController!.value.previewSize!.height,
-                  ),
+                  imageSize: _imageSize != Size.zero
+                      ? _imageSize
+                      : Size(
+                          _cameraController!.value.previewSize!.height,
+                          _cameraController!.value.previewSize!.width,
+                        ),
                   isFrontCamera: _cameraController!.description.lensDirection ==
                       CameraLensDirection.front,
                   animationValue: _scanAnimController.value,
