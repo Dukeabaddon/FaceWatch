@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:ui' show Size;
 import 'package:flutter/foundation.dart' show WriteBuffer;
+import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:camera/camera.dart';
 
@@ -46,12 +47,11 @@ class FaceDetectorService {
   InputImage? inputImageFromCameraImage(
     CameraImage image,
     CameraDescription camera,
-    int sensorOrientation,
+    DeviceOrientation deviceOrientation,
   ) {
-    final rotation = _getRotation(camera.sensorOrientation);
+    final rotation = _getImageRotation(camera, deviceOrientation);
     if (rotation == null) return null;
 
-    // On Android, camera stream is NV21; on iOS it's BGRA8888
     if (Platform.isAndroid) {
       return _buildNv21InputImage(image, rotation);
     }
@@ -69,6 +69,47 @@ class FaceDetectorService {
         bytesPerRow: plane.bytesPerRow,
       ),
     );
+  }
+
+  InputImageRotation? _getImageRotation(
+    CameraDescription camera,
+    DeviceOrientation deviceOrientation,
+  ) {
+    // Map device orientation to degrees
+    int deviceDeg;
+    switch (deviceOrientation) {
+      case DeviceOrientation.portraitUp:
+        deviceDeg = 0;
+        break;
+      case DeviceOrientation.landscapeLeft:
+        deviceDeg = 90;
+        break;
+      case DeviceOrientation.portraitDown:
+        deviceDeg = 180;
+        break;
+      case DeviceOrientation.landscapeRight:
+        deviceDeg = 270;
+        break;
+    }
+
+    final sensorDeg = camera.sensorOrientation;
+    int rotationDeg;
+
+    if (camera.lensDirection == CameraLensDirection.front) {
+      // Front camera: sensor is mirrored
+      rotationDeg = (sensorDeg + deviceDeg) % 360;
+    } else {
+      // Back camera
+      rotationDeg = (sensorDeg - deviceDeg + 360) % 360;
+    }
+
+    switch (rotationDeg) {
+      case 0:   return InputImageRotation.rotation0deg;
+      case 90:  return InputImageRotation.rotation90deg;
+      case 180: return InputImageRotation.rotation180deg;
+      case 270: return InputImageRotation.rotation270deg;
+      default:  return null;
+    }
   }
 
   InputImage _buildNv21InputImage(CameraImage image, InputImageRotation rotation) {
@@ -90,18 +131,4 @@ class FaceDetectorService {
     );
   }
 
-  InputImageRotation? _getRotation(int sensorOrientation) {
-    switch (sensorOrientation) {
-      case 0:
-        return InputImageRotation.rotation0deg;
-      case 90:
-        return InputImageRotation.rotation90deg;
-      case 180:
-        return InputImageRotation.rotation180deg;
-      case 270:
-        return InputImageRotation.rotation270deg;
-      default:
-        return null;
-    }
-  }
 }

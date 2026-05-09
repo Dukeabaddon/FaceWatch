@@ -25,6 +25,12 @@ class _RecognitionScreenState extends State<RecognitionScreen>
   final FaceEmbedderService _embedderService = FaceEmbedderService();
   final FaceStorageService _storageService = FaceStorageService();
 
+  List<CameraDescription> _cameras = [];
+  int _cameraIndex = 0;
+  bool _isSwitchingCamera = false;
+  // ignore: prefer_final_fields
+  DeviceOrientation _deviceOrientation = DeviceOrientation.portraitUp;
+
   List<Face> _faces = [];
   List<String?> _labels = [];
   bool _isProcessing = false;
@@ -54,16 +60,22 @@ class _RecognitionScreenState extends State<RecognitionScreen>
   }
 
   Future<void> _initCamera() async {
-    final cameras = await availableCameras();
-    if (cameras.isEmpty) return;
-
-    final front = cameras.firstWhere(
+    _cameras = await availableCameras();
+    if (_cameras.isEmpty) return;
+    _cameraIndex = _cameras.indexWhere(
       (c) => c.lensDirection == CameraLensDirection.front,
-      orElse: () => cameras.first,
     );
+    if (_cameraIndex < 0) _cameraIndex = 0;
+    await _startCamera(_cameraIndex);
+  }
+
+  Future<void> _startCamera(int index) async {
+    setState(() { _cameraReady = false; _faces = []; _labels = []; });
+    await _cameraController?.stopImageStream();
+    await _cameraController?.dispose();
 
     _cameraController = CameraController(
-      front,
+      _cameras[index],
       ResolutionPreset.medium,
       enableAudio: false,
       imageFormatGroup: Platform.isAndroid
@@ -73,9 +85,16 @@ class _RecognitionScreenState extends State<RecognitionScreen>
 
     await _cameraController!.initialize();
     if (!mounted) return;
-
-    setState(() => _cameraReady = true);
+    _cameraController!.lockCaptureOrientation(DeviceOrientation.portraitUp);
+    setState(() { _cameraReady = true; _isSwitchingCamera = false; });
     _cameraController!.startImageStream(_onFrame);
+  }
+
+  Future<void> _switchCamera() async {
+    if (_cameras.length < 2 || _isSwitchingCamera) return;
+    setState(() => _isSwitchingCamera = true);
+    _cameraIndex = (_cameraIndex + 1) % _cameras.length;
+    await _startCamera(_cameraIndex);
   }
 
   Future<void> _onFrame(CameraImage image) async {
@@ -87,7 +106,7 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       final inputImage = _detectorService.inputImageFromCameraImage(
         image,
         camera,
-        camera.sensorOrientation,
+        _deviceOrientation,
       );
       if (inputImage == null) return;
 
@@ -226,6 +245,17 @@ class _RecognitionScreenState extends State<RecognitionScreen>
         ),
         elevation: 0,
         actions: [
+          if (_cameras.length > 1)
+            IconButton(
+              icon: _isSwitchingCamera
+                  ? const SizedBox(
+                      width: 20, height: 20,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.flip_camera_android_outlined),
+              tooltip: 'Switch camera',
+              onPressed: _isSwitchingCamera ? null : _switchCamera,
+            ),
           Padding(
             padding: const EdgeInsets.only(right: 16),
             child: Center(

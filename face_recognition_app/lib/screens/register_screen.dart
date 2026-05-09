@@ -27,10 +27,15 @@ class _RegisterScreenState extends State<RegisterScreen>
   final FaceEmbedderService _embedderService = FaceEmbedderService();
   final FaceStorageService _storageService = FaceStorageService();
 
+  List<CameraDescription> _cameras = [];
+  int _cameraIndex = 0;
   List<Face> _faces = [];
   bool _isProcessing = false;
   bool _cameraReady = false;
+  bool _isSwitchingCamera = false;
   _FaceState _faceState = _FaceState.none;
+  // ignore: prefer_final_fields
+  DeviceOrientation _deviceOrientation = DeviceOrientation.portraitUp;
 
   // Countdown hold-still auto-capture
   int _holdCountdown = 0;
@@ -62,16 +67,26 @@ class _RegisterScreenState extends State<RegisterScreen>
   }
 
   Future<void> _initCamera() async {
-    final cameras = await availableCameras();
-    if (cameras.isEmpty) return;
+    _cameras = await availableCameras();
+    if (_cameras.isEmpty) return;
 
-    final front = cameras.firstWhere(
+    // Default to front camera
+    _cameraIndex = _cameras.indexWhere(
       (c) => c.lensDirection == CameraLensDirection.front,
-      orElse: () => cameras.first,
     );
+    if (_cameraIndex < 0) _cameraIndex = 0;
+
+    await _startCamera(_cameraIndex);
+  }
+
+  Future<void> _startCamera(int index) async {
+    setState(() { _cameraReady = false; _faces = []; _faceState = _FaceState.none; });
+
+    await _cameraController?.stopImageStream();
+    await _cameraController?.dispose();
 
     _cameraController = CameraController(
-      front,
+      _cameras[index],
       ResolutionPreset.medium,
       enableAudio: false,
       imageFormatGroup: Platform.isAndroid
@@ -82,9 +97,19 @@ class _RegisterScreenState extends State<RegisterScreen>
     await _cameraController!.initialize();
     if (!mounted) return;
 
-    setState(() => _cameraReady = true);
+    // Track device orientation changes
+    _cameraController!.lockCaptureOrientation(DeviceOrientation.portraitUp);
 
+    setState(() { _cameraReady = true; _isSwitchingCamera = false; });
     _cameraController!.startImageStream(_onFrame);
+  }
+
+  Future<void> _switchCamera() async {
+    if (_cameras.length < 2 || _isSwitchingCamera) return;
+    _cancelHoldTimer();
+    setState(() => _isSwitchingCamera = true);
+    _cameraIndex = (_cameraIndex + 1) % _cameras.length;
+    await _startCamera(_cameraIndex);
   }
 
   Future<void> _onFrame(CameraImage image) async {
@@ -94,7 +119,7 @@ class _RegisterScreenState extends State<RegisterScreen>
     try {
       final camera = _cameraController!.description;
       final inputImage = _detectorService.inputImageFromCameraImage(
-        image, camera, camera.sensorOrientation,
+        image, camera, _deviceOrientation,
       );
       if (inputImage == null) return;
 
@@ -364,6 +389,19 @@ class _RegisterScreenState extends State<RegisterScreen>
           style: TextStyle(fontSize: 16, letterSpacing: 1),
         ),
         elevation: 0,
+        actions: [
+          if (_cameras.length > 1)
+            IconButton(
+              icon: _isSwitchingCamera
+                  ? const SizedBox(
+                      width: 20, height: 20,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.flip_camera_android_outlined),
+              tooltip: 'Switch camera',
+              onPressed: _isSwitchingCamera ? null : _switchCamera,
+            ),
+        ],
       ),
       body: Column(
         children: [
