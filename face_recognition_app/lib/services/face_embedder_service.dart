@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui' show Rect;
 import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
@@ -177,34 +178,39 @@ class FaceEmbedderService {
       height: _inputSize,
     );
 
-    final input = _imageToInputTensor(resized);
-    final output = List.filled(_embeddingSize, 0.0).reshape([1, _embeddingSize]);
+    // Build input as Float32List (matches verified working MCarlomagno reference).
+    // Nested Dart Lists may not flatten correctly in tflite_flutter for all models.
+    final flat = _imageToFloat32List(resized);
+    final input = flat.reshape([1, _inputSize, _inputSize, 3]);
+    final output = List.generate(1, (_) => List.filled(_embeddingSize, 0.0));
 
     _interpreter!.run(input, output);
 
-    final embedding = List<double>.from(output[0] as List);
-    final normalized = _normalize(embedding);
-    // Diagnostic: log first 4 values + L2 norm check. Healthy embedding should
-    // have varied non-zero values. All-zero or constant = input corruption.
-    final sumAbs = normalized.fold<double>(0, (s, e) => s + e.abs());
+    final raw = List<double>.from(output[0] as List);
+    // Diagnostic: print RAW model output (before normalization). If these are
+    // identical for different inputs → model is broken or input not reaching it.
+    final rawL1 = raw.fold<double>(0, (s, e) => s + e.abs());
     // ignore: avoid_print
-    print('[Embed] crop=${faceImage.width}x${faceImage.height} L1=${sumAbs.toStringAsFixed(2)} sample=${normalized.take(4).map((e) => e.toStringAsFixed(3)).toList()}');
+    print('[Embed] crop=${faceImage.width}x${faceImage.height} rawL1=${rawL1.toStringAsFixed(2)} rawSample=${raw.take(5).map((e) => e.toStringAsFixed(3)).toList()}');
+
+    final normalized = _normalize(raw);
     return normalized;
   }
 
-  List<List<List<List<double>>>> _imageToInputTensor(img.Image image) {
-    return List.generate(1, (_) {
-      return List.generate(_inputSize, (y) {
-        return List.generate(_inputSize, (x) {
-          final pixel = image.getPixel(x, y);
-          return [
-            (pixel.r / 127.5) - 1.0,
-            (pixel.g / 127.5) - 1.0,
-            (pixel.b / 127.5) - 1.0,
-          ];
-        });
-      });
-    });
+  /// Flatten 112×112 RGB image to Float32List with normalization (px-128)/128
+  /// matching MobileFaceNet training expectations.
+  Float32List _imageToFloat32List(img.Image image) {
+    final buf = Float32List(_inputSize * _inputSize * 3);
+    int idx = 0;
+    for (int y = 0; y < _inputSize; y++) {
+      for (int x = 0; x < _inputSize; x++) {
+        final pixel = image.getPixel(x, y);
+        buf[idx++] = (pixel.r.toDouble() - 128.0) / 128.0;
+        buf[idx++] = (pixel.g.toDouble() - 128.0) / 128.0;
+        buf[idx++] = (pixel.b.toDouble() - 128.0) / 128.0;
+      }
+    }
+    return buf;
   }
 
   List<double> _normalize(List<double> v) {
