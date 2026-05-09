@@ -1,0 +1,69 @@
+# Flutter / Dart
+**/build/
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.packages
+**/.pub-cache/
+**/.pub/
+**/pubspec.lock
+**/.dart_tool/
+**/generated_plugin_registrant.dart
+
+# Android
+**/android/.gradle/
+**/android/captures/
+**/android/gradlew
+**/android/gradlew.bat
+**/android/local.properties
+**/android/key.properties
+**/android/app/debug/
+**/android/app/profile/
+**/android/**/*.jks
+**/android/**/*.keystore
+
+# iOS
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/App.framework
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/ephemeral/
+**/ios/Runner/GeneratedPluginRegistrant.*
+**/ios/Runner.xcworkspace/
+
+# Xcode
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/
+
+# macOS
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/settings.json
+.vscode/.ropeproject
+*.iml
+
+# Credentials / secrets
+**/.env
+**/*.env
+**/secrets.dart
+**/google-services.json
+**/GoogleService-Info.plist
+
+# graphify output
+graphify-out/
+
+# Generated model script (dev only)
+generate_model.py
+
+# Hive generated adapters are kept (needed for build)
+# !**/lib/models/*.g.dart
+
+# Test coverage
+coverage/
