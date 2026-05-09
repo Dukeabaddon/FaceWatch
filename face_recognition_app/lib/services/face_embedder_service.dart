@@ -3,7 +3,9 @@ import 'dart:math';
 import 'dart:ui' show Rect;
 import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
+import 'package:path_provider/path_provider.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
+import 'face_detector_service.dart';
 
 class FaceEmbedderService {
   static const int _inputSize = 112;
@@ -20,6 +22,89 @@ class FaceEmbedderService {
   void dispose() {
     _interpreter?.close();
     _interpreter = null;
+  }
+
+  /// BULLETPROOF pipeline: JPEG file path → embedding.
+  /// - ML Kit detects face on the JPEG (EXIF-oriented) → bbox in JPEG coords
+  /// - img.decodeImage + bakeOrientation → same JPEG as upright RGB
+  /// - Crop from UPRIGHT image using JPEG bbox (1:1 coord mapping)
+  /// - Save debug crop to app cache dir for visual inspection
+  /// Returns (embedding, debugCropPath) or (null, null) on failure.
+  Future<({List<double>? embedding, String? debugPath, int faceCount})>
+      embedFromJpegFile(
+    String jpegPath,
+    FaceDetectorService detector, {
+    String tag = 'face',
+  }) async {
+    try {
+      // 1. Detect face via ML Kit (ML Kit handles EXIF rotation internally)
+      final faces = await detector.detectFromFile(jpegPath);
+      // ignore: avoid_print
+      print('[JpegEmbed] faces=${faces.length} path=$jpegPath');
+      if (faces.isEmpty) {
+        return (embedding: null, debugPath: null, faceCount: 0);
+      }
+
+      // 2. Decode JPEG + bake EXIF orientation → upright RGB img.Image
+      final bytes = await File(jpegPath).readAsBytes();
+      var full = img.decodeImage(bytes);
+      if (full == null) {
+        return (embedding: null, debugPath: null, faceCount: faces.length);
+      }
+      full = img.bakeOrientation(full);
+      // ignore: avoid_print
+      print('[JpegEmbed] decoded upright=${full.width}x${full.height}');
+
+      // 3. Crop using ML Kit bbox (same oriented space)
+      final face = faces.first;
+      final box = face.boundingBox;
+      // Expand bbox by 15% margin to capture forehead/chin
+      final margin = box.width * 0.15;
+      final expanded = Rect.fromLTRB(
+        box.left - margin,
+        box.top - margin,
+        box.right + margin,
+        box.bottom + margin,
+      );
+      final x = expanded.left.toInt().clamp(0, full.width - 1);
+      final y = expanded.top.toInt().clamp(0, full.height - 1);
+      final w = expanded.width.toInt().clamp(1, full.width - x);
+      final h = expanded.height.toInt().clamp(1, full.height - y);
+      if (w < 50 || h < 50) {
+        // ignore: avoid_print
+        print('[JpegEmbed] crop too small: ${w}x$h');
+        return (embedding: null, debugPath: null, faceCount: faces.length);
+      }
+      final faceImg = img.copyCrop(full, x: x, y: y, width: w, height: h);
+
+      // 4. Save debug crop
+      String? debugPath;
+      try {
+        final dir = await getApplicationCacheDirectory();
+        final crops = Directory('${dir.path}/face_crops');
+        if (!await crops.exists()) await crops.create(recursive: true);
+        final ts = DateTime.now().millisecondsSinceEpoch;
+        debugPath = '${crops.path}/${tag}_$ts.jpg';
+        await File(debugPath).writeAsBytes(img.encodeJpg(faceImg, quality: 85));
+        // ignore: avoid_print
+        print('[JpegEmbed] debug crop saved: $debugPath');
+      } catch (e) {
+        // ignore: avoid_print
+        print('[JpegEmbed] debug save failed: $e');
+      }
+
+      // 5. Embed
+      final embedding = getEmbedding(faceImg);
+      return (
+        embedding: embedding,
+        debugPath: debugPath,
+        faceCount: faces.length,
+      );
+    } catch (e) {
+      // ignore: avoid_print
+      print('[JpegEmbed] error: $e');
+      return (embedding: null, debugPath: null, faceCount: 0);
+    }
   }
 
   /// Converts raw CameraImage to an UPRIGHT RGB image matching ML Kit display coords.

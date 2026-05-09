@@ -39,6 +39,12 @@ class _RecognitionScreenState extends State<RecognitionScreen>
   String? _lastFeedbackLabel;
   DateTime _lastFeedbackTime = DateTime.fromMillisecondsSinceEpoch(0);
 
+  // Snapshot-based identification state
+  Timer? _identifyTimer;
+  bool _isIdentifying = false;
+  String _statusLabel = 'Scanning...';
+  String? _lastDebugCropPath;
+
   late AnimationController _scanAnimController;
 
   @override
@@ -88,6 +94,12 @@ class _RecognitionScreenState extends State<RecognitionScreen>
     _cameraController!.lockCaptureOrientation(DeviceOrientation.portraitUp);
     setState(() { _cameraReady = true; _isSwitchingCamera = false; });
     _cameraController!.startImageStream(_onFrame);
+    // Start the periodic identification loop
+    _identifyTimer?.cancel();
+    _identifyTimer = Timer.periodic(
+      const Duration(milliseconds: 1500),
+      (_) => _identifyTick(),
+    );
   }
 
   Future<void> _switchCamera() async {
@@ -113,69 +125,97 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       final faces = await _detectorService.detectFacesWithContours(inputImage);
       // Swap W/H: sensor landscape 720x480, but display is portrait after 90deg rotation
       final sensorSize = Size(image.height.toDouble(), image.width.toDouble());
-      // Degrees to rotate raw sensor crop → upright face for MobileFaceNet
-      final rotDeg = _detectorService.getRotationDegrees(camera, _deviceOrientation);
 
       if (faces.isEmpty) {
         if (mounted) setState(() { _faces = []; _labels = []; _imageSize = sensorSize; });
         return;
       }
 
-      final knownFaces = _storageService.getAllFaces().map((f) => (
-        name: f.name,
-        embedding: f.embedding,
-      )).toList();
-
-      final labels = <String?>[];
-
-      if (knownFaces.isNotEmpty) {
-        // NEW pipeline: convert CameraImage → upright RGB (rotation applied to full image).
-        // After this, ML Kit bbox maps 1:1 to the upright image → simple crop, no transform math.
-        final upright = FaceEmbedderService.cameraImageToUprightRgb(image, rotDeg);
-        if (upright != null) {
-          debugPrint('[Recognize] upright=${upright.width}x${upright.height} rot=$rotDeg');
-          for (final face in faces) {
-            final faceImg = FaceEmbedderService.cropFaceFromUpright(upright, face.boundingBox);
-            if (faceImg == null) {
-              labels.add(null);
-              continue;
-            }
-
-            final embedding = _embedderService.getEmbedding(faceImg);
-            if (embedding != null) {
-              final match = FaceEmbedderService.findBestMatch(
-                embedding,
-                knownFaces,
-              );
-              if (match != null) {
-                debugPrint('[Recognize] MATCH: ${match.name} sim=${match.similarity.toStringAsFixed(3)}');
-              } else {
-                debugPrint('[Recognize] NO MATCH (best below threshold)');
-              }
-              labels.add(match != null
-                  ? '${match.name} ${(match.similarity * 100).toStringAsFixed(0)}%'
-                  : 'Unknown');
-            } else {
-              labels.add(null);
-            }
-          }
-        }
-      } else {
-        for (int i = 0; i < faces.length; i++) {
-          labels.add(null);
-        }
-      }
-
+      // Stream pipeline is ONLY responsible for the mesh overlay + face count.
+      // Identification happens in _identifyTick (snapshot-based) every 1.5s.
+      // The _labels list is kept in sync with _faces so the painter can show
+      // the last identified label beside each detected face.
+      final labels = List<String?>.filled(faces.length, _statusLabel);
       if (mounted) {
         setState(() {
           _faces = faces;
           _labels = labels;
           _imageSize = sensorSize;
         });
-        _triggerFeedback(labels);
       }
     } finally {
       _isProcessing = false;
+    }
+  }
+
+  /// Snapshot-based identification: pause stream, take a JPEG, run full
+  /// ML-Kit-on-file + MobileFaceNet pipeline, show result, resume stream.
+  Future<void> _identifyTick() async {
+    if (!mounted) return;
+    if (_isIdentifying) return;
+    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+    if (_faces.isEmpty) return; // only identify when a face is visible
+
+    _isIdentifying = true;
+    try {
+      // Pause stream briefly
+      try { await _cameraController!.stopImageStream(); } catch (_) {}
+
+      final xFile = await _cameraController!.takePicture();
+      debugPrint('[Identify] jpeg: ${xFile.path}');
+
+      final result = await _embedderService.embedFromJpegFile(
+        xFile.path,
+        _detectorService,
+        tag: 'recognize',
+      );
+
+      String label;
+      if (result.faceCount == 0) {
+        label = 'No face';
+      } else if (result.embedding == null) {
+        label = 'Error';
+      } else {
+        final known = _storageService.getAllFaces().map((f) => (
+          name: f.name,
+          embedding: f.embedding,
+        )).toList();
+        if (known.isEmpty) {
+          label = 'No registered faces';
+        } else {
+          final match = FaceEmbedderService.findBestMatch(
+            result.embedding!,
+            known,
+          );
+          if (match != null) {
+            label = '${match.name} ${(match.similarity * 100).toStringAsFixed(0)}%';
+            debugPrint('[Identify] MATCH: ${match.name} sim=${match.similarity.toStringAsFixed(3)}');
+          } else {
+            label = 'Unknown';
+            debugPrint('[Identify] NO MATCH');
+          }
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _statusLabel = label;
+          _lastDebugCropPath = result.debugPath;
+          // update label overlay for the single face we care about
+          _labels = List<String?>.filled(_faces.length, label);
+        });
+        _triggerFeedback([label]);
+      }
+    } catch (e) {
+      debugPrint('[Identify] error: $e');
+    } finally {
+      // Resume stream
+      try {
+        if (mounted && _cameraController != null && _cameraController!.value.isInitialized) {
+          await _cameraController!.startImageStream(_onFrame);
+        }
+      } catch (_) {}
+      _isIdentifying = false;
     }
   }
 
@@ -210,6 +250,7 @@ class _RecognitionScreenState extends State<RecognitionScreen>
 
   @override
   void dispose() {
+    _identifyTimer?.cancel();
     _scanAnimController.dispose();
     _cameraController?.stopImageStream();
     _cameraController?.dispose();
@@ -305,6 +346,84 @@ class _RecognitionScreenState extends State<RecognitionScreen>
                 ),
               ),
             ),
+          // Debug: status bar + last face crop thumbnail
+          Positioned(
+            bottom: 16,
+            left: 16,
+            right: 16,
+            child: Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.72),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.cyanAccent.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                children: [
+                  if (_lastDebugCropPath != null)
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.file(
+                        File(_lastDebugCropPath!),
+                        width: 64,
+                        height: 64,
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                        errorBuilder: (ctx, err, st) => Container(
+                          width: 64,
+                          height: 64,
+                          color: Colors.white10,
+                          child: const Icon(Icons.image_not_supported,
+                              color: Colors.white24, size: 20),
+                        ),
+                      ),
+                    )
+                  else
+                    Container(
+                      width: 64,
+                      height: 64,
+                      decoration: BoxDecoration(
+                        color: Colors.white10,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Icon(Icons.hourglass_empty,
+                          color: Colors.white24, size: 20),
+                    ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _statusLabel,
+                          style: const TextStyle(
+                            color: Colors.cyanAccent,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          _isIdentifying
+                              ? 'Capturing...'
+                              : (_faces.isEmpty
+                                  ? 'Point at a face'
+                                  : 'Next ID in ~1.5s'),
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );

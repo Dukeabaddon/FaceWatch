@@ -44,6 +44,14 @@ class FaceDetectorService {
     return await _contourDetector.processImage(inputImage);
   }
 
+  /// Detect faces directly from a file path (JPEG/PNG).
+  /// ML Kit handles EXIF orientation internally, so bbox coords are in
+  /// the UPRIGHT (oriented) image space — the same space you get from
+  /// `img.bakeOrientation(img.decodeImage(bytes))`.
+  Future<List<Face>> detectFromFile(String path) async {
+    return await _contourDetector.processImage(InputImage.fromFilePath(path));
+  }
+
   /// Returns the clockwise degrees the sensor image must be rotated to appear upright.
   /// Use this to rotate a face crop before feeding to MobileFaceNet.
   int getRotationDegrees(CameraDescription camera, DeviceOrientation deviceOrientation) {

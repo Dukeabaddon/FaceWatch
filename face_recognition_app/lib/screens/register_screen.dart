@@ -28,8 +28,6 @@ class _RegisterScreenState extends State<RegisterScreen>
   List<CameraDescription> _cameras = [];
   int _cameraIndex = 0;
   List<Face> _faces = [];
-  CameraImage? _lastCameraImage;
-  int _lastRotDeg = 0;
   Size _imageSize = Size.zero;
   bool _isProcessing = false;
   bool _cameraReady = false;
@@ -130,15 +128,10 @@ class _RegisterScreenState extends State<RegisterScreen>
       final sensorSize = Size(image.height.toDouble(), image.width.toDouble());
       final state = _evaluateFaceState(faces, image);
 
-      final rotDeg = _detectorService.getRotationDegrees(camera, _deviceOrientation);
       setState(() {
         _faces = faces;
         _faceState = state;
         _imageSize = sensorSize;
-        if (faces.isNotEmpty) {
-          _lastCameraImage = image;
-          _lastRotDeg = rotDeg;
-        }
       });
     } finally {
       _isProcessing = false;
@@ -280,43 +273,34 @@ class _RegisterScreenState extends State<RegisterScreen>
     setState(() => _faceState = _FaceState.none);
 
     try {
-      // Crop from the live CameraImage frame — same coordinate space as ML Kit bounding box.
-      // Do NOT use takePicture() JPEG: it is full-res (e.g. 3264x2448) while ML Kit
-      // returns coords in stream space (720x480) → wrong crop → garbage embedding.
-      final rawFrame = _lastCameraImage;
-      if (rawFrame == null) {
-        _showError('No camera frame available');
+      // BULLETPROOF pipeline: snapshot via takePicture() → ML Kit detect on JPEG
+      // → crop on EXIF-baked upright image → embed. Guaranteed coord consistency
+      // because ML Kit and the crop both operate on the SAME JPEG file.
+      debugPrint('[Register] takePicture...');
+      final xFile = await _cameraController!.takePicture();
+      debugPrint('[Register] jpeg saved: ${xFile.path}');
+
+      final result = await _embedderService.embedFromJpegFile(
+        xFile.path,
+        _detectorService,
+        tag: 'register_${name.trim().toLowerCase().replaceAll(' ', '_')}',
+      );
+
+      if (result.faceCount == 0) {
+        _showError('No face detected in photo — try again');
         _cameraController!.startImageStream(_onFrame);
         return;
       }
-
-      // NEW pipeline: rotate full frame to upright, then crop with display bbox directly.
-      final upright = FaceEmbedderService.cameraImageToUprightRgb(rawFrame, _lastRotDeg);
-      if (upright == null) {
-        _showError('Failed to decode camera frame');
-        _cameraController!.startImageStream(_onFrame);
-        return;
-      }
-      debugPrint('[Register] upright=${upright.width}x${upright.height} rot=$_lastRotDeg');
-
-      final face = _faces.first;
-      final faceImg = FaceEmbedderService.cropFaceFromUpright(upright, face.boundingBox);
-      if (faceImg == null) {
-        _showError('Face crop too small — move closer');
-        _cameraController!.startImageStream(_onFrame);
-        return;
-      }
-
-      final embedding = _embedderService.getEmbedding(faceImg);
-      if (embedding == null) {
+      if (result.embedding == null) {
         _showError('Could not generate face embedding');
+        _cameraController!.startImageStream(_onFrame);
         return;
       }
 
       await _storageService.saveFace(
         RegisteredFace(
           name: name.trim(),
-          embedding: embedding,
+          embedding: result.embedding!,
           registeredAt: DateTime.now(),
         ),
       );
@@ -325,9 +309,12 @@ class _RegisterScreenState extends State<RegisterScreen>
         HapticFeedback.heavyImpact();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('${name.trim()} registered successfully'),
+            content: Text(
+              '${name.trim()} registered. Debug crop: ${result.debugPath?.split('/').last ?? 'n/a'}',
+            ),
             backgroundColor: Colors.cyanAccent.withValues(alpha: 0.9),
             behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 4),
           ),
         );
         Navigator.pop(context);
