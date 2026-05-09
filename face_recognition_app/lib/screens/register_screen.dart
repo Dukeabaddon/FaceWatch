@@ -126,6 +126,8 @@ class _RegisterScreenState extends State<RegisterScreen>
       final faces = await _detectorService.detectFacesWithContours(inputImage);
       if (!mounted) return;
 
+      debugPrint('[FaceDetect] faces=${faces.length} img=${image.width}x${image.height}');
+
       final state = _evaluateFaceState(faces, image);
 
       setState(() {

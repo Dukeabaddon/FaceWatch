@@ -1,6 +1,6 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' show Size;
-import 'package:flutter/foundation.dart' show WriteBuffer;
 import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:camera/camera.dart';
@@ -25,8 +25,8 @@ class FaceDetectorService {
         enableClassification: false,
         enableLandmarks: true,
         enableContours: true,
-        enableTracking: false,
-        performanceMode: FaceDetectorMode.accurate,
+        enableTracking: true,
+        performanceMode: FaceDetectorMode.fast,
       ),
     );
   }
@@ -75,7 +75,6 @@ class FaceDetectorService {
     CameraDescription camera,
     DeviceOrientation deviceOrientation,
   ) {
-    // Map device orientation to degrees
     int deviceDeg;
     switch (deviceOrientation) {
       case DeviceOrientation.portraitUp:
@@ -95,11 +94,14 @@ class FaceDetectorService {
     final sensorDeg = camera.sensorOrientation;
     int rotationDeg;
 
-    if (camera.lensDirection == CameraLensDirection.front) {
-      // Front camera: sensor is mirrored
-      rotationDeg = (sensorDeg + deviceDeg) % 360;
+    if (Platform.isIOS) {
+      // iOS: rotation is always 0 — AVFoundation handles orientation
+      rotationDeg = 0;
+    } else if (camera.lensDirection == CameraLensDirection.front) {
+      // Android front camera: mirror compensation
+      rotationDeg = (sensorDeg - deviceDeg + 360) % 360;
     } else {
-      // Back camera
+      // Android back camera
       rotationDeg = (sensorDeg - deviceDeg + 360) % 360;
     }
 
@@ -113,20 +115,46 @@ class FaceDetectorService {
   }
 
   InputImage _buildNv21InputImage(CameraImage image, InputImageRotation rotation) {
-    // Concat all YUV planes — official google_mlkit pattern for Android yuv420.
-    final WriteBuffer allBytes = WriteBuffer();
-    for (final plane in image.planes) {
-      allBytes.putUint8List(plane.bytes);
+    // Convert YUV420 planes to NV21 format (Y plane + interleaved VU)
+    // NV21 = Y bytes followed by interleaved V,U bytes
+    final int width = image.width;
+    final int height = image.height;
+    final int ySize = width * height;
+    final int uvSize = width * height ~/ 2;
+    final nv21 = List<int>.filled(ySize + uvSize, 0);
+
+    // Copy Y plane row by row (handle stride)
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+
+    int pos = 0;
+    for (int row = 0; row < height; row++) {
+      final rowStart = row * yPlane.bytesPerRow;
+      for (int col = 0; col < width; col++) {
+        nv21[pos++] = yPlane.bytes[rowStart + col];
+      }
     }
-    final bytes = allBytes.done().buffer.asUint8List();
+
+    // Interleave V and U for NV21 (V first, then U)
+    final uvRowStride = uPlane.bytesPerRow;
+    final uvPixelStride = uPlane.bytesPerPixel ?? 1;
+    for (int row = 0; row < height ~/ 2; row++) {
+      for (int col = 0; col < width ~/ 2; col++) {
+        final vIdx = row * vPlane.bytesPerRow + col * (vPlane.bytesPerPixel ?? 1);
+        final uIdx = row * uvRowStride + col * uvPixelStride;
+        nv21[pos++] = vPlane.bytes[vIdx]; // V
+        nv21[pos++] = uPlane.bytes[uIdx]; // U
+      }
+    }
 
     return InputImage.fromBytes(
-      bytes: bytes,
+      bytes: Uint8List.fromList(nv21),
       metadata: InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
+        size: Size(width.toDouble(), height.toDouble()),
         rotation: rotation,
-        format: InputImageFormat.yuv_420_888,
-        bytesPerRow: image.planes[0].bytesPerRow,
+        format: InputImageFormat.nv21,
+        bytesPerRow: width,
       ),
     );
   }
