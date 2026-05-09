@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' show Size;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:camera/camera.dart';
@@ -49,11 +51,15 @@ class FaceDetectorService {
     final rotation = _getRotation(camera.sensorOrientation);
     if (rotation == null) return null;
 
+    // On Android, camera stream is NV21; on iOS it's BGRA8888
+    if (Platform.isAndroid) {
+      return _buildNv21InputImage(image, rotation);
+    }
+
     final format = InputImageFormatValue.fromRawValue(image.format.raw);
     if (format == null) return null;
 
     final plane = image.planes.first;
-
     return InputImage.fromBytes(
       bytes: plane.bytes,
       metadata: InputImageMetadata(
@@ -61,6 +67,37 @@ class FaceDetectorService {
         rotation: rotation,
         format: format,
         bytesPerRow: plane.bytesPerRow,
+      ),
+    );
+  }
+
+  InputImage _buildNv21InputImage(CameraImage image, InputImageRotation rotation) {
+    // Concatenate YUV planes into NV21 byte array
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+
+    final int ySize = yPlane.bytes.length;
+    final int uvSize = uPlane.bytes.length + vPlane.bytes.length;
+    final nv21 = List<int>.filled(ySize + uvSize, 0);
+
+    // Copy Y plane
+    nv21.setRange(0, ySize, yPlane.bytes);
+
+    // Interleave V and U (NV21 = Y + VU interleaved)
+    int offset = ySize;
+    for (int i = 0; i < vPlane.bytes.length; i++) {
+      nv21[offset++] = vPlane.bytes[i];
+      if (i < uPlane.bytes.length) nv21[offset++] = uPlane.bytes[i];
+    }
+
+    return InputImage.fromBytes(
+      bytes: Uint8List.fromList(nv21),
+      metadata: InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: rotation,
+        format: InputImageFormat.nv21,
+        bytesPerRow: yPlane.bytesPerRow,
       ),
     );
   }

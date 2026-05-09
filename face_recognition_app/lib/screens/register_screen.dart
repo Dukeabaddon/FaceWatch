@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -61,7 +62,9 @@ class _RegisterScreenState extends State<RegisterScreen>
       front,
       ResolutionPreset.medium,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.bgra8888,
+      imageFormatGroup: Platform.isAndroid
+          ? ImageFormatGroup.yuv420
+          : ImageFormatGroup.bgra8888,
     );
 
     await _cameraController!.initialize();
@@ -262,14 +265,21 @@ class _RegisterScreenState extends State<RegisterScreen>
                           painter: FaceMeshPainter(
                             faces: _faces,
                             imageSize: Size(
-                              _cameraController!.value.previewSize!.height,
                               _cameraController!.value.previewSize!.width,
+                              _cameraController!.value.previewSize!.height,
                             ),
                             isFrontCamera: _cameraController!
                                     .description.lensDirection ==
                                 CameraLensDirection.front,
                             animationValue: _scanAnimController.value,
                           ),
+                          child: _faces.isEmpty
+                              ? CustomPaint(
+                                  painter: _FaceGuidePainter(
+                                    animValue: _scanAnimController.value,
+                                  ),
+                                )
+                              : null,
                         ),
                       ),
                     ],
@@ -278,9 +288,11 @@ class _RegisterScreenState extends State<RegisterScreen>
                     child: CircularProgressIndicator(color: Colors.cyanAccent),
                   ),
           ),
-          Container(
+          SafeArea(
+            top: false,
+            child: Container(
             color: Colors.black,
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
             child: Column(
               children: [
                 Text(
@@ -314,8 +326,83 @@ class _RegisterScreenState extends State<RegisterScreen>
               ],
             ),
           ),
+          ), // SafeArea
         ],
       ),
     );
   }
+}
+
+// Guide oval + scan line shown when no face is detected yet
+class _FaceGuidePainter extends CustomPainter {
+  final double animValue;
+  const _FaceGuidePainter({required this.animValue});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height * 0.45;
+    final rx = size.width * 0.32;
+    final ry = size.height * 0.28;
+
+    final ovalRect = Rect.fromCenter(
+      center: Offset(cx, cy),
+      width: rx * 2,
+      height: ry * 2,
+    );
+
+    // Dashed oval guide
+    final borderPaint = Paint()
+      ..color = Colors.cyanAccent.withValues(alpha: 0.55)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+    canvas.drawOval(ovalRect, borderPaint);
+
+    // Corner accent marks on oval (top/bottom/left/right)
+    const markLen = 18.0;
+    final markPaint = Paint()
+      ..color = Colors.cyanAccent
+      ..strokeWidth = 2.5
+      ..style = PaintingStyle.stroke;
+
+    // Top
+    canvas.drawLine(Offset(cx - markLen, cy - ry), Offset(cx + markLen, cy - ry), markPaint);
+    // Bottom
+    canvas.drawLine(Offset(cx - markLen, cy + ry), Offset(cx + markLen, cy + ry), markPaint);
+    // Left
+    canvas.drawLine(Offset(cx - rx, cy - markLen), Offset(cx - rx, cy + markLen), markPaint);
+    // Right
+    canvas.drawLine(Offset(cx + rx, cy - markLen), Offset(cx + rx, cy + markLen), markPaint);
+
+    // Animated scan line inside oval
+    final scanY = (cy - ry) + (ry * 2) * animValue;
+    final halfWidth = rx * (1 - ((scanY - cy).abs() / ry).clamp(0.0, 1.0) * 0.6);
+    final scanPaint = Paint()
+      ..color = Colors.cyanAccent.withValues(alpha: 0.5 + 0.4 * (1 - animValue))
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+    canvas.drawLine(
+      Offset(cx - halfWidth, scanY),
+      Offset(cx + halfWidth, scanY),
+      scanPaint,
+    );
+
+    // Instruction text
+    final tp = TextPainter(
+      text: const TextSpan(
+        text: 'ALIGN FACE HERE',
+        style: TextStyle(
+          color: Colors.white38,
+          fontSize: 11,
+          letterSpacing: 2,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, Offset(cx - tp.width / 2, cy + ry + 14));
+  }
+
+  @override
+  bool shouldRepaint(_FaceGuidePainter old) => old.animValue != animValue;
 }

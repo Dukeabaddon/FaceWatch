@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
@@ -65,7 +66,9 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       front,
       ResolutionPreset.medium,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.bgra8888,
+      imageFormatGroup: Platform.isAndroid
+          ? ImageFormatGroup.yuv420
+          : ImageFormatGroup.bgra8888,
     );
 
     await _cameraController!.initialize();
@@ -253,8 +256,8 @@ class _RecognitionScreenState extends State<RecognitionScreen>
                 painter: FaceMeshPainter(
                   faces: _faces,
                   imageSize: Size(
-                    _cameraController!.value.previewSize!.height,
                     _cameraController!.value.previewSize!.width,
+                    _cameraController!.value.previewSize!.height,
                   ),
                   isFrontCamera: _cameraController!.description.lensDirection ==
                       CameraLensDirection.front,
