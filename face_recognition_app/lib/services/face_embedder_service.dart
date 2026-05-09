@@ -72,7 +72,7 @@ class FaceEmbedderService {
   static ({String name, double similarity})? findBestMatch(
     List<double> queryEmbedding,
     List<({String name, List<double> embedding})> known, {
-    double threshold = 0.65,
+    double threshold = 0.75,
   }) {
     if (known.isEmpty) return null;
 

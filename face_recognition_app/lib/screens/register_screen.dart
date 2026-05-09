@@ -129,7 +129,11 @@ class _RegisterScreenState extends State<RegisterScreen>
 
       debugPrint('[FaceDetect] faces=${faces.length} img=${image.width}x${image.height}');
 
-      final sensorSize = Size(image.width.toDouble(), image.height.toDouble());
+      // Sensor is landscape (e.g. 720x480). Display rotates 90deg → portrait.
+      // Painter scaleX = screenW/imageW, scaleY = screenH/imageH.
+      // After rotation: sensor W maps to screen H, sensor H maps to screen W.
+      // So pass swapped: Size(image.height, image.width).
+      final sensorSize = Size(image.height.toDouble(), image.width.toDouble());
       final state = _evaluateFaceState(faces, image);
 
       setState(() {
@@ -194,11 +198,13 @@ class _RegisterScreenState extends State<RegisterScreen>
     setState(() => _holdCountdown = _holdSeconds);
     _holdTimer = Timer.periodic(const Duration(seconds: 1), (t) {
       if (!mounted) { t.cancel(); return; }
-      setState(() => _holdCountdown--);
+      setState(() {
+        if (_holdCountdown > 0) _holdCountdown--;
+      });
       if (_holdCountdown <= 0) {
         t.cancel();
         _holdTimer = null;
-        _captureAndRegister();
+        // No auto-capture: user must tap button
       }
     });
   }
@@ -257,6 +263,50 @@ class _RegisterScreenState extends State<RegisterScreen>
     if (name == null || name.trim().isEmpty) {
       _cameraController!.startImageStream(_onFrame);
       return;
+    }
+
+    // Duplicate check
+    if (_storageService.nameExists(name.trim())) {
+      if (mounted) {
+        final overwrite = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF0F1A1A),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: Colors.orangeAccent.withValues(alpha: 0.5)),
+            ),
+            title: const Text('Name Already Exists',
+                style: TextStyle(color: Colors.orangeAccent, fontSize: 15)),
+            content: Text(
+              '"${name.trim()}" is already registered.\nOverwrite with new face data?',
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel', style: TextStyle(color: Colors.white38)),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Overwrite', style: TextStyle(color: Colors.orangeAccent)),
+              ),
+            ],
+          ),
+        );
+        if (overwrite != true) {
+          _cameraController!.startImageStream(_onFrame);
+          return;
+        }
+        // Delete old entry before saving new one
+        final all = _storageService.getAllFaces();
+        for (int i = 0; i < all.length; i++) {
+          if (all[i].name.toLowerCase().trim() == name.toLowerCase().trim()) {
+            await _storageService.deleteFace(i);
+            break;
+          }
+        }
+      }
     }
 
     setState(() => _faceState = _FaceState.none);
@@ -426,8 +476,8 @@ class _RegisterScreenState extends State<RegisterScreen>
                             imageSize: _imageSize != Size.zero
                                 ? _imageSize
                                 : Size(
-                                    _cameraController!.value.previewSize!.height,
                                     _cameraController!.value.previewSize!.width,
+                                    _cameraController!.value.previewSize!.height,
                                   ),
                             isFrontCamera: _cameraController!
                                     .description.lensDirection ==
@@ -527,10 +577,8 @@ class _RegisterScreenState extends State<RegisterScreen>
                         ),
                       ),
                       child: Text(
-                        isGood
-                            ? (_holdCountdown > 0
-                                ? 'Auto-capture in $_holdCountdown s  (or tap)'
-                                : 'Capture & Register')
+                        isGood && _holdCountdown > 0
+                            ? 'Face Ready — Tap to Capture ($_holdCountdown)'
                             : 'Capture & Register',
                         style: const TextStyle(
                             fontWeight: FontWeight.bold, fontSize: 14),

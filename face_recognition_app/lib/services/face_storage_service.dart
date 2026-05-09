@@ -26,4 +26,10 @@ class FaceStorageService {
   }
 
   int get count => _box.length;
+
+  bool nameExists(String name) {
+    return _box.values.any(
+      (f) => f.name.toLowerCase().trim() == name.toLowerCase().trim(),
+    );
+  }
 }

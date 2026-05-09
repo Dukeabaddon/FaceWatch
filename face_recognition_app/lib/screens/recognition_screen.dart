@@ -112,7 +112,8 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       if (inputImage == null) return;
 
       final faces = await _detectorService.detectFacesWithContours(inputImage);
-      final sensorSize = Size(image.width.toDouble(), image.height.toDouble());
+      // Swap W/H: sensor landscape 720x480, but display is portrait after 90deg rotation
+      final sensorSize = Size(image.height.toDouble(), image.width.toDouble());
 
       if (faces.isEmpty) {
         if (mounted) setState(() { _faces = []; _labels = []; _imageSize = sensorSize; });
@@ -202,24 +203,45 @@ class _RecognitionScreenState extends State<RecognitionScreen>
 
   img.Image? _cameraImageToRgbImage(CameraImage image) {
     try {
-      final plane = image.planes[0];
-      final bytes = plane.bytes;
-      final width = image.width;
-      final height = image.height;
-
-      final rgbImage = img.Image(width: width, height: height);
-      for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-          final pixelIndex = y * plane.bytesPerRow + x * 4;
-          if (pixelIndex + 3 >= bytes.length) continue;
-          final b = bytes[pixelIndex];
-          final g = bytes[pixelIndex + 1];
-          final r = bytes[pixelIndex + 2];
-          final a = bytes[pixelIndex + 3];
-          rgbImage.setPixel(x, y, img.ColorRgba8(r, g, b, a));
+      if (Platform.isAndroid) {
+        // YUV420: plane[0]=Y, plane[1]=U, plane[2]=V
+        final yPlane = image.planes[0];
+        final uPlane = image.planes[1];
+        final vPlane = image.planes[2];
+        final width = image.width;
+        final height = image.height;
+        final rgbImage = img.Image(width: width, height: height);
+        final uvPixelStride = uPlane.bytesPerPixel ?? 1;
+        for (int y = 0; y < height; y++) {
+          for (int x = 0; x < width; x++) {
+            final yVal = yPlane.bytes[y * yPlane.bytesPerRow + x] & 0xFF;
+            final uvRow = (y ~/ 2) * uPlane.bytesPerRow;
+            final uvCol = (x ~/ 2) * uvPixelStride;
+            final uVal = (uPlane.bytes[uvRow + uvCol] & 0xFF) - 128;
+            final vVal = (vPlane.bytes[(y ~/ 2) * vPlane.bytesPerRow + (x ~/ 2) * (vPlane.bytesPerPixel ?? 1)] & 0xFF) - 128;
+            final r = (yVal + 1.370705 * vVal).clamp(0, 255).toInt();
+            final g = (yVal - 0.337633 * uVal - 0.698001 * vVal).clamp(0, 255).toInt();
+            final b = (yVal + 1.732446 * uVal).clamp(0, 255).toInt();
+            rgbImage.setPixel(x, y, img.ColorRgb8(r, g, b));
+          }
         }
+        return rgbImage;
+      } else {
+        // iOS BGRA8888: plane[0] has full interleaved BGRA
+        final plane = image.planes[0];
+        final bytes = plane.bytes;
+        final width = image.width;
+        final height = image.height;
+        final rgbImage = img.Image(width: width, height: height);
+        for (int y = 0; y < height; y++) {
+          for (int x = 0; x < width; x++) {
+            final i = y * plane.bytesPerRow + x * 4;
+            if (i + 3 >= bytes.length) continue;
+            rgbImage.setPixel(x, y, img.ColorRgb8(bytes[i + 2], bytes[i + 1], bytes[i]));
+          }
+        }
+        return rgbImage;
       }
-      return rgbImage;
     } catch (_) {
       return null;
     }
@@ -291,8 +313,8 @@ class _RecognitionScreenState extends State<RecognitionScreen>
                   imageSize: _imageSize != Size.zero
                       ? _imageSize
                       : Size(
-                          _cameraController!.value.previewSize!.height,
                           _cameraController!.value.previewSize!.width,
+                          _cameraController!.value.previewSize!.height,
                         ),
                   isFrontCamera: _cameraController!.description.lensDirection ==
                       CameraLensDirection.front,
