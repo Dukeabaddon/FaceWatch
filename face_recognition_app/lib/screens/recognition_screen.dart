@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:image/image.dart' as img;
 import 'package:vibration/vibration.dart';
 import '../services/face_detector_service.dart';
 import '../services/face_embedder_service.dart';
@@ -130,22 +129,16 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       final labels = <String?>[];
 
       if (knownFaces.isNotEmpty) {
-        final fullImg = _cameraImageToRgbImage(image);
-        if (fullImg != null) {
+        // NEW pipeline: convert CameraImage → upright RGB (rotation applied to full image).
+        // After this, ML Kit bbox maps 1:1 to the upright image → simple crop, no transform math.
+        final upright = FaceEmbedderService.cameraImageToUprightRgb(image, rotDeg);
+        if (upright != null) {
+          debugPrint('[Recognize] upright=${upright.width}x${upright.height} rot=$rotDeg');
           for (final face in faces) {
-            final box = face.boundingBox;
-            // ML Kit bbox is in DISPLAY (rotated) space.
-            // _cameraImageToRgbImage gives RAW sensor landscape image.
-            // Must convert bbox from display space → raw sensor space before crop.
-            final rawBox = _displayBoxToSensorBox(box, fullImg.width, fullImg.height, rotDeg);
-            final x = rawBox.left.toInt().clamp(0, fullImg.width - 1);
-            final y = rawBox.top.toInt().clamp(0, fullImg.height - 1);
-            final w = rawBox.width.toInt().clamp(1, fullImg.width - x);
-            final h = rawBox.height.toInt().clamp(1, fullImg.height - y);
-            var faceImg = img.copyCrop(fullImg, x: x, y: y, width: w, height: h);
-            // Rotate crop upright so MobileFaceNet receives a frontal face
-            if (rotDeg != 0) {
-              faceImg = img.copyRotate(faceImg, angle: rotDeg.toDouble());
+            final faceImg = FaceEmbedderService.cropFaceFromUpright(upright, face.boundingBox);
+            if (faceImg == null) {
+              labels.add(null);
+              continue;
             }
 
             final embedding = _embedderService.getEmbedding(faceImg);
@@ -214,75 +207,6 @@ class _RecognitionScreenState extends State<RecognitionScreen>
     }
   }
 
-  /// Convert bbox from ML Kit display/rotated space back to raw sensor space.
-  /// rawW/rawH are the sensor image dimensions (e.g. 720x480).
-  /// rotDeg is the clockwise rotation applied by ML Kit (e.g. 270).
-  Rect _displayBoxToSensorBox(Rect displayBox, int rawW, int rawH, int rotDeg) {
-    // ML Kit applies rotation so the display coords are in portrait space.
-    // We need to reverse that to get raw landscape sensor coords.
-    final double l = displayBox.left;
-    final double t = displayBox.top;
-    final double r = displayBox.right;
-    final double b = displayBox.bottom;
-    switch (rotDeg) {
-      case 90:
-        // display(x,y) = sensor(y, rawW-x) → reverse: sensor_x=rawW-displayY, sensor_y=displayX
-        return Rect.fromLTRB(rawW - b, l, rawW - t, r);
-      case 180:
-        return Rect.fromLTRB(rawW - r, rawH - b, rawW - l, rawH - t);
-      case 270:
-        // display(x,y) = sensor(rawH-y, x) → reverse: sensor_x=displayY, sensor_y=rawH-displayX
-        return Rect.fromLTRB(t, rawH - r, b, rawH - l);
-      default: // 0
-        return displayBox;
-    }
-  }
-
-  img.Image? _cameraImageToRgbImage(CameraImage image) {
-    try {
-      if (Platform.isAndroid) {
-        // YUV420: plane[0]=Y, plane[1]=U, plane[2]=V
-        final yPlane = image.planes[0];
-        final uPlane = image.planes[1];
-        final vPlane = image.planes[2];
-        final width = image.width;
-        final height = image.height;
-        final rgbImage = img.Image(width: width, height: height);
-        final uvPixelStride = uPlane.bytesPerPixel ?? 1;
-        for (int y = 0; y < height; y++) {
-          for (int x = 0; x < width; x++) {
-            final yVal = yPlane.bytes[y * yPlane.bytesPerRow + x] & 0xFF;
-            final uvRow = (y ~/ 2) * uPlane.bytesPerRow;
-            final uvCol = (x ~/ 2) * uvPixelStride;
-            final uVal = (uPlane.bytes[uvRow + uvCol] & 0xFF) - 128;
-            final vVal = (vPlane.bytes[(y ~/ 2) * vPlane.bytesPerRow + (x ~/ 2) * (vPlane.bytesPerPixel ?? 1)] & 0xFF) - 128;
-            final r = (yVal + 1.370705 * vVal).clamp(0, 255).toInt();
-            final g = (yVal - 0.337633 * uVal - 0.698001 * vVal).clamp(0, 255).toInt();
-            final b = (yVal + 1.732446 * uVal).clamp(0, 255).toInt();
-            rgbImage.setPixel(x, y, img.ColorRgb8(r, g, b));
-          }
-        }
-        return rgbImage;
-      } else {
-        // iOS BGRA8888: plane[0] has full interleaved BGRA
-        final plane = image.planes[0];
-        final bytes = plane.bytes;
-        final width = image.width;
-        final height = image.height;
-        final rgbImage = img.Image(width: width, height: height);
-        for (int y = 0; y < height; y++) {
-          for (int x = 0; x < width; x++) {
-            final i = y * plane.bytesPerRow + x * 4;
-            if (i + 3 >= bytes.length) continue;
-            rgbImage.setPixel(x, y, img.ColorRgb8(bytes[i + 2], bytes[i + 1], bytes[i]));
-          }
-        }
-        return rgbImage;
-      }
-    } catch (_) {
-      return null;
-    }
-  }
 
   @override
   void dispose() {

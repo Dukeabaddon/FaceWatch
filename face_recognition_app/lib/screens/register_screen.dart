@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:image/image.dart' as img;
 import '../services/face_detector_service.dart';
 import '../services/face_embedder_service.dart';
 import '../services/face_storage_service.dart';
@@ -291,24 +290,21 @@ class _RegisterScreenState extends State<RegisterScreen>
         return;
       }
 
-      final fullImage = _cameraImageToRgbImage(rawFrame);
-      if (fullImage == null) {
+      // NEW pipeline: rotate full frame to upright, then crop with display bbox directly.
+      final upright = FaceEmbedderService.cameraImageToUprightRgb(rawFrame, _lastRotDeg);
+      if (upright == null) {
         _showError('Failed to decode camera frame');
         _cameraController!.startImageStream(_onFrame);
         return;
       }
+      debugPrint('[Register] upright=${upright.width}x${upright.height} rot=$_lastRotDeg');
 
       final face = _faces.first;
-      final box = face.boundingBox;
-      // Convert ML Kit display-space bbox → raw sensor space, then rotate crop upright
-      final rawBox = _displayBoxToSensorBox(box, fullImage.width, fullImage.height, _lastRotDeg);
-      final cx = rawBox.left.toInt().clamp(0, fullImage.width - 1);
-      final cy = rawBox.top.toInt().clamp(0, fullImage.height - 1);
-      final cw = rawBox.width.toInt().clamp(1, fullImage.width - cx);
-      final ch = rawBox.height.toInt().clamp(1, fullImage.height - cy);
-      var faceImg = img.copyCrop(fullImage, x: cx, y: cy, width: cw, height: ch);
-      if (_lastRotDeg != 0) {
-        faceImg = img.copyRotate(faceImg, angle: _lastRotDeg.toDouble());
+      final faceImg = FaceEmbedderService.cropFaceFromUpright(upright, face.boundingBox);
+      if (faceImg == null) {
+        _showError('Face crop too small — move closer');
+        _cameraController!.startImageStream(_onFrame);
+        return;
       }
 
       final embedding = _embedderService.getEmbedding(faceImg);
@@ -397,66 +393,6 @@ class _RegisterScreenState extends State<RegisterScreen>
     );
   }
 
-  Rect _displayBoxToSensorBox(Rect displayBox, int rawW, int rawH, int rotDeg) {
-    final double l = displayBox.left;
-    final double t = displayBox.top;
-    final double r = displayBox.right;
-    final double b = displayBox.bottom;
-    switch (rotDeg) {
-      case 90:
-        return Rect.fromLTRB(rawW - b, l, rawW - t, r);
-      case 180:
-        return Rect.fromLTRB(rawW - r, rawH - b, rawW - l, rawH - t);
-      case 270:
-        return Rect.fromLTRB(t, rawH - r, b, rawH - l);
-      default:
-        return displayBox;
-    }
-  }
-
-  img.Image? _cameraImageToRgbImage(CameraImage image) {
-    try {
-      if (Platform.isAndroid) {
-        final yPlane = image.planes[0];
-        final uPlane = image.planes[1];
-        final vPlane = image.planes[2];
-        final width = image.width;
-        final height = image.height;
-        final rgbImage = img.Image(width: width, height: height);
-        final uvPixelStride = uPlane.bytesPerPixel ?? 1;
-        for (int y = 0; y < height; y++) {
-          for (int x = 0; x < width; x++) {
-            final yVal = yPlane.bytes[y * yPlane.bytesPerRow + x] & 0xFF;
-            final uvRow = (y ~/ 2) * uPlane.bytesPerRow;
-            final uvCol = (x ~/ 2) * uvPixelStride;
-            final uVal = (uPlane.bytes[uvRow + uvCol] & 0xFF) - 128;
-            final vVal = (vPlane.bytes[(y ~/ 2) * vPlane.bytesPerRow + (x ~/ 2) * (vPlane.bytesPerPixel ?? 1)] & 0xFF) - 128;
-            final r = (yVal + 1.370705 * vVal).clamp(0, 255).toInt();
-            final g = (yVal - 0.337633 * uVal - 0.698001 * vVal).clamp(0, 255).toInt();
-            final b = (yVal + 1.732446 * uVal).clamp(0, 255).toInt();
-            rgbImage.setPixel(x, y, img.ColorRgb8(r, g, b));
-          }
-        }
-        return rgbImage;
-      } else {
-        final plane = image.planes[0];
-        final bytes = plane.bytes;
-        final width = image.width;
-        final height = image.height;
-        final rgbImage = img.Image(width: width, height: height);
-        for (int y = 0; y < height; y++) {
-          for (int x = 0; x < width; x++) {
-            final i = y * plane.bytesPerRow + x * 4;
-            if (i + 3 >= bytes.length) continue;
-            rgbImage.setPixel(x, y, img.ColorRgb8(bytes[i + 2], bytes[i + 1], bytes[i]));
-          }
-        }
-        return rgbImage;
-      }
-    } catch (_) {
-      return null;
-    }
-  }
 
   @override
   void dispose() {
