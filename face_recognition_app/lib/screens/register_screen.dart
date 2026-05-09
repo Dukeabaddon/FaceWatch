@@ -11,6 +11,8 @@ import '../services/face_storage_service.dart';
 import '../models/registered_face.dart';
 import '../painters/face_mesh_painter.dart';
 
+enum _FaceState { none, tooFar, tooClose, offCenter, lowLight, good }
+
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
 
@@ -28,9 +30,15 @@ class _RegisterScreenState extends State<RegisterScreen>
   List<Face> _faces = [];
   bool _isProcessing = false;
   bool _cameraReady = false;
-  String _statusText = 'Position your face in the frame';
+  _FaceState _faceState = _FaceState.none;
+
+  // Countdown hold-still auto-capture
+  int _holdCountdown = 0;
+  Timer? _holdTimer;
+  static const _holdSeconds = 3;
 
   late AnimationController _scanAnimController;
+  late AnimationController _pulseController;
 
   @override
   void initState() {
@@ -39,6 +47,10 @@ class _RegisterScreenState extends State<RegisterScreen>
       vsync: this,
       duration: const Duration(seconds: 2),
     )..repeat();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    )..repeat(reverse: true);
     _init();
   }
 
@@ -82,26 +94,124 @@ class _RegisterScreenState extends State<RegisterScreen>
     try {
       final camera = _cameraController!.description;
       final inputImage = _detectorService.inputImageFromCameraImage(
-        image,
-        camera,
-        camera.sensorOrientation,
+        image, camera, camera.sensorOrientation,
       );
       if (inputImage == null) return;
 
       final faces = await _detectorService.detectFacesWithContours(inputImage);
+      if (!mounted) return;
 
-      if (mounted) {
-        setState(() {
-          _faces = faces;
-          _statusText = faces.isEmpty
-              ? 'Position your face in the frame'
-              : faces.length == 1
-                  ? 'Face detected — tap capture'
-                  : 'Multiple faces — use only one';
-        });
+      final state = _evaluateFaceState(faces, image);
+
+      setState(() {
+        _faces = faces;
+        _faceState = state;
+      });
+
+      if (state == _FaceState.good) {
+        _startHoldTimer();
+      } else {
+        _cancelHoldTimer();
       }
     } finally {
       _isProcessing = false;
+    }
+  }
+
+  _FaceState _evaluateFaceState(List<Face> faces, CameraImage image) {
+    if (faces.isEmpty) return _FaceState.none;
+    if (faces.length > 1) return _FaceState.none;
+
+    final face = faces.first;
+    final frameW = image.width.toDouble();
+    final frameH = image.height.toDouble();
+    final box = face.boundingBox;
+
+    // Too far: face bounding box < 15% of frame area
+    final faceArea = box.width * box.height;
+    final frameArea = frameW * frameH;
+    if (faceArea / frameArea < 0.10) return _FaceState.tooFar;
+
+    // Too close: face > 80% of frame
+    if (faceArea / frameArea > 0.80) return _FaceState.tooClose;
+
+    // Off center: face center deviates > 35% from frame center
+    final faceCx = box.center.dx / frameW;
+    final faceCy = box.center.dy / frameH;
+    if ((faceCx - 0.5).abs() > 0.35 || (faceCy - 0.5).abs() > 0.35) {
+      return _FaceState.offCenter;
+    }
+
+    // Low light: sample Y-plane average brightness < 40
+    if (Platform.isAndroid && image.planes.isNotEmpty) {
+      final yPlane = image.planes[0].bytes;
+      final step = yPlane.length ~/ 200;
+      if (step > 0) {
+        int sum = 0;
+        for (int i = 0; i < yPlane.length; i += step) {
+          sum += yPlane[i];
+        }
+        final avg = sum / (yPlane.length / step);
+        if (avg < 40) return _FaceState.lowLight;
+      }
+    }
+
+    return _FaceState.good;
+  }
+
+  void _startHoldTimer() {
+    if (_holdTimer != null) return;
+    setState(() => _holdCountdown = _holdSeconds);
+    _holdTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
+      setState(() => _holdCountdown--);
+      if (_holdCountdown <= 0) {
+        t.cancel();
+        _holdTimer = null;
+        _captureAndRegister();
+      }
+    });
+  }
+
+  void _cancelHoldTimer() {
+    if (_holdTimer != null) {
+      _holdTimer!.cancel();
+      _holdTimer = null;
+      if (mounted) setState(() => _holdCountdown = 0);
+    }
+  }
+
+  String get _statusText {
+    switch (_faceState) {
+      case _FaceState.none:
+        return 'Position your face in the oval';
+      case _FaceState.tooFar:
+        return 'Move closer';
+      case _FaceState.tooClose:
+        return 'Move further away';
+      case _FaceState.offCenter:
+        return 'Center your face';
+      case _FaceState.lowLight:
+        return 'Too dark — find better lighting';
+      case _FaceState.good:
+        return _holdCountdown > 0
+            ? 'Hold still... $_holdCountdown'
+            : 'Face locked';
+    }
+  }
+
+  Color get _stateColor {
+    switch (_faceState) {
+      case _FaceState.none:
+        return Colors.white38;
+      case _FaceState.tooFar:
+      case _FaceState.tooClose:
+      case _FaceState.offCenter:
+        return Colors.orangeAccent;
+      case _FaceState.lowLight:
+        return Colors.yellowAccent;
+      case _FaceState.good:
+        return Colors.greenAccent;
     }
   }
 
@@ -119,7 +229,7 @@ class _RegisterScreenState extends State<RegisterScreen>
       return;
     }
 
-    setState(() => _statusText = 'Processing...');
+    setState(() => _faceState = _FaceState.none);
 
     try {
       final xFile = await _cameraController!.takePicture();
@@ -230,7 +340,9 @@ class _RegisterScreenState extends State<RegisterScreen>
 
   @override
   void dispose() {
+    _holdTimer?.cancel();
     _scanAnimController.dispose();
+    _pulseController.dispose();
     _cameraController?.stopImageStream();
     _cameraController?.dispose();
     _detectorService.dispose();
@@ -240,6 +352,8 @@ class _RegisterScreenState extends State<RegisterScreen>
 
   @override
   Widget build(BuildContext context) {
+    final isGood = _faceState == _FaceState.good;
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -259,8 +373,10 @@ class _RegisterScreenState extends State<RegisterScreen>
                     fit: StackFit.expand,
                     children: [
                       CameraPreview(_cameraController!),
+                      // Mesh overlay + guide oval
                       AnimatedBuilder(
-                        animation: _scanAnimController,
+                        animation: Listenable.merge(
+                            [_scanAnimController, _pulseController]),
                         builder: (context, child) => CustomPaint(
                           painter: FaceMeshPainter(
                             faces: _faces,
@@ -273,15 +389,35 @@ class _RegisterScreenState extends State<RegisterScreen>
                                 CameraLensDirection.front,
                             animationValue: _scanAnimController.value,
                           ),
-                          child: _faces.isEmpty
-                              ? CustomPaint(
-                                  painter: _FaceGuidePainter(
-                                    animValue: _scanAnimController.value,
-                                  ),
-                                )
-                              : null,
+                          child: CustomPaint(
+                            painter: _FaceGuidePainter(
+                              animValue: _scanAnimController.value,
+                              pulseValue: _pulseController.value,
+                              faceState: _faceState,
+                              stateColor: _stateColor,
+                              showOval: _faces.isEmpty,
+                            ),
+                          ),
                         ),
                       ),
+                      // Countdown overlay in center when holding
+                      if (isGood && _holdCountdown > 0)
+                        Center(
+                          child: AnimatedBuilder(
+                            animation: _pulseController,
+                            builder: (context, child) => Opacity(
+                              opacity: 0.7 + 0.3 * _pulseController.value,
+                              child: Text(
+                                '$_holdCountdown',
+                                style: const TextStyle(
+                                  color: Colors.greenAccent,
+                                  fontSize: 96,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                     ],
                   )
                 : const Center(
@@ -291,53 +427,114 @@ class _RegisterScreenState extends State<RegisterScreen>
           SafeArea(
             top: false,
             child: Container(
-            color: Colors.black,
-            padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
-            child: Column(
-              children: [
-                Text(
-                  _statusText,
-                  style: TextStyle(
-                    color: _faces.length == 1 ? Colors.cyanAccent : Colors.white54,
-                    fontSize: 13,
-                    letterSpacing: 0.5,
+              color: Colors.black,
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+              child: Column(
+                children: [
+                  // State icon + message row
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        _stateIcon,
+                        color: _stateColor,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _statusText,
+                        style: TextStyle(
+                          color: _stateColor,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: _faces.length == 1 ? _captureAndRegister : null,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.cyanAccent,
-                      disabledBackgroundColor: Colors.white12,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
+                  const SizedBox(height: 12),
+                  // Progress bar: fill as countdown ticks
+                  if (isGood)
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: _holdCountdown > 0
+                            ? (_holdSeconds - _holdCountdown) / _holdSeconds
+                            : 1.0,
+                        backgroundColor: Colors.white12,
+                        valueColor: AlwaysStoppedAnimation(_stateColor),
+                        minHeight: 4,
                       ),
                     ),
-                    child: const Text(
-                      'Capture & Register',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                  if (isGood) const SizedBox(height: 12),
+                  // Manual capture button — shown but auto-triggers too
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: isGood ? _captureAndRegister : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _stateColor,
+                        disabledBackgroundColor: Colors.white12,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      child: Text(
+                        isGood
+                            ? (_holdCountdown > 0
+                                ? 'Auto-capture in $_holdCountdown s  (or tap)'
+                                : 'Capture & Register')
+                            : 'Capture & Register',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 14),
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 30),
-              ],
+                  const SizedBox(height: 30),
+                ],
+              ),
             ),
           ),
-          ), // SafeArea
         ],
       ),
     );
   }
+
+  IconData get _stateIcon {
+    switch (_faceState) {
+      case _FaceState.none:
+        return Icons.face_outlined;
+      case _FaceState.tooFar:
+        return Icons.zoom_in;
+      case _FaceState.tooClose:
+        return Icons.zoom_out;
+      case _FaceState.offCenter:
+        return Icons.center_focus_strong_outlined;
+      case _FaceState.lowLight:
+        return Icons.wb_sunny_outlined;
+      case _FaceState.good:
+        return Icons.check_circle_outline;
+    }
+  }
 }
 
-// Guide oval + scan line shown when no face is detected yet
+// Guide oval — always visible, color reflects face state
 class _FaceGuidePainter extends CustomPainter {
   final double animValue;
-  const _FaceGuidePainter({required this.animValue});
+  final double pulseValue;
+  final _FaceState faceState;
+  final Color stateColor;
+  final bool showOval;
+
+  const _FaceGuidePainter({
+    required this.animValue,
+    required this.pulseValue,
+    required this.faceState,
+    required this.stateColor,
+    required this.showOval,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -352,58 +549,58 @@ class _FaceGuidePainter extends CustomPainter {
       height: ry * 2,
     );
 
-    // Dashed oval guide
+    final isGood = faceState == _FaceState.good;
+    final ovalAlpha = isGood ? (0.6 + 0.4 * pulseValue) : 0.55;
+
+    // Oval border — color changes with state
     final borderPaint = Paint()
-      ..color = Colors.cyanAccent.withValues(alpha: 0.55)
-      ..strokeWidth = 1.5
+      ..color = stateColor.withValues(alpha: ovalAlpha)
+      ..strokeWidth = isGood ? 3.0 : 1.5
       ..style = PaintingStyle.stroke;
     canvas.drawOval(ovalRect, borderPaint);
 
-    // Corner accent marks on oval (top/bottom/left/right)
-    const markLen = 18.0;
+    // Accent marks
+    final markLen = isGood ? 22.0 : 18.0;
     final markPaint = Paint()
-      ..color = Colors.cyanAccent
-      ..strokeWidth = 2.5
+      ..color = stateColor
+      ..strokeWidth = isGood ? 3.5 : 2.5
       ..style = PaintingStyle.stroke;
-
-    // Top
     canvas.drawLine(Offset(cx - markLen, cy - ry), Offset(cx + markLen, cy - ry), markPaint);
-    // Bottom
     canvas.drawLine(Offset(cx - markLen, cy + ry), Offset(cx + markLen, cy + ry), markPaint);
-    // Left
     canvas.drawLine(Offset(cx - rx, cy - markLen), Offset(cx - rx, cy + markLen), markPaint);
-    // Right
     canvas.drawLine(Offset(cx + rx, cy - markLen), Offset(cx + rx, cy + markLen), markPaint);
 
-    // Animated scan line inside oval
-    final scanY = (cy - ry) + (ry * 2) * animValue;
-    final halfWidth = rx * (1 - ((scanY - cy).abs() / ry).clamp(0.0, 1.0) * 0.6);
-    final scanPaint = Paint()
-      ..color = Colors.cyanAccent.withValues(alpha: 0.5 + 0.4 * (1 - animValue))
-      ..strokeWidth = 1.2
-      ..style = PaintingStyle.stroke;
-    canvas.drawLine(
-      Offset(cx - halfWidth, scanY),
-      Offset(cx + halfWidth, scanY),
-      scanPaint,
-    );
+    // Scan line — only when no face yet
+    if (showOval) {
+      final scanY = (cy - ry) + (ry * 2) * animValue;
+      final halfWidth = rx * (1 - ((scanY - cy).abs() / ry).clamp(0.0, 1.0) * 0.6);
+      final scanPaint = Paint()
+        ..color = stateColor.withValues(alpha: 0.4 + 0.4 * (1 - animValue))
+        ..strokeWidth = 1.2
+        ..style = PaintingStyle.stroke;
+      canvas.drawLine(Offset(cx - halfWidth, scanY), Offset(cx + halfWidth, scanY), scanPaint);
 
-    // Instruction text
-    final tp = TextPainter(
-      text: const TextSpan(
-        text: 'ALIGN FACE HERE',
-        style: TextStyle(
-          color: Colors.white38,
-          fontSize: 11,
-          letterSpacing: 2,
-          fontWeight: FontWeight.w500,
+      // Instruction text
+      final tp = TextPainter(
+        text: const TextSpan(
+          text: 'ALIGN FACE HERE',
+          style: TextStyle(
+            color: Colors.white38,
+            fontSize: 11,
+            letterSpacing: 2,
+            fontWeight: FontWeight.w500,
+          ),
         ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(canvas, Offset(cx - tp.width / 2, cy + ry + 14));
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(cx - tp.width / 2, cy + ry + 14));
+    }
   }
 
   @override
-  bool shouldRepaint(_FaceGuidePainter old) => old.animValue != animValue;
+  bool shouldRepaint(_FaceGuidePainter old) =>
+      old.animValue != animValue ||
+      old.pulseValue != pulseValue ||
+      old.faceState != faceState ||
+      old.showOval != showOval;
 }
