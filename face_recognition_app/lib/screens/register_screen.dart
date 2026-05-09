@@ -30,6 +30,7 @@ class _RegisterScreenState extends State<RegisterScreen>
   int _cameraIndex = 0;
   List<Face> _faces = [];
   CameraImage? _lastCameraImage;
+  int _lastRotDeg = 0;
   Size _imageSize = Size.zero;
   bool _isProcessing = false;
   bool _cameraReady = false;
@@ -130,11 +131,15 @@ class _RegisterScreenState extends State<RegisterScreen>
       final sensorSize = Size(image.height.toDouble(), image.width.toDouble());
       final state = _evaluateFaceState(faces, image);
 
+      final rotDeg = _detectorService.getRotationDegrees(camera, _deviceOrientation);
       setState(() {
         _faces = faces;
         _faceState = state;
         _imageSize = sensorSize;
-        if (faces.isNotEmpty) _lastCameraImage = image;
+        if (faces.isNotEmpty) {
+          _lastCameraImage = image;
+          _lastRotDeg = rotDeg;
+        }
       });
     } finally {
       _isProcessing = false;
@@ -295,14 +300,16 @@ class _RegisterScreenState extends State<RegisterScreen>
 
       final face = _faces.first;
       final box = face.boundingBox;
-
-      final faceImg = img.copyCrop(
-        fullImage,
-        x: box.left.toInt().clamp(0, fullImage.width - 1),
-        y: box.top.toInt().clamp(0, fullImage.height - 1),
-        width: box.width.toInt().clamp(1, fullImage.width - box.left.toInt().clamp(0, fullImage.width - 1)),
-        height: box.height.toInt().clamp(1, fullImage.height - box.top.toInt().clamp(0, fullImage.height - 1)),
-      );
+      // Convert ML Kit display-space bbox → raw sensor space, then rotate crop upright
+      final rawBox = _displayBoxToSensorBox(box, fullImage.width, fullImage.height, _lastRotDeg);
+      final cx = rawBox.left.toInt().clamp(0, fullImage.width - 1);
+      final cy = rawBox.top.toInt().clamp(0, fullImage.height - 1);
+      final cw = rawBox.width.toInt().clamp(1, fullImage.width - cx);
+      final ch = rawBox.height.toInt().clamp(1, fullImage.height - cy);
+      var faceImg = img.copyCrop(fullImage, x: cx, y: cy, width: cw, height: ch);
+      if (_lastRotDeg != 0) {
+        faceImg = img.copyRotate(faceImg, angle: _lastRotDeg.toDouble());
+      }
 
       final embedding = _embedderService.getEmbedding(faceImg);
       if (embedding == null) {
@@ -388,6 +395,23 @@ class _RegisterScreenState extends State<RegisterScreen>
         behavior: SnackBarBehavior.floating,
       ),
     );
+  }
+
+  Rect _displayBoxToSensorBox(Rect displayBox, int rawW, int rawH, int rotDeg) {
+    final double l = displayBox.left;
+    final double t = displayBox.top;
+    final double r = displayBox.right;
+    final double b = displayBox.bottom;
+    switch (rotDeg) {
+      case 90:
+        return Rect.fromLTRB(rawW - b, l, rawW - t, r);
+      case 180:
+        return Rect.fromLTRB(rawW - r, rawH - b, rawW - l, rawH - t);
+      case 270:
+        return Rect.fromLTRB(t, rawH - r, b, rawH - l);
+      default:
+        return displayBox;
+    }
   }
 
   img.Image? _cameraImageToRgbImage(CameraImage image) {

@@ -44,6 +44,20 @@ class FaceDetectorService {
     return await _contourDetector.processImage(inputImage);
   }
 
+  /// Returns the clockwise degrees the sensor image must be rotated to appear upright.
+  /// Use this to rotate a face crop before feeding to MobileFaceNet.
+  int getRotationDegrees(CameraDescription camera, DeviceOrientation deviceOrientation) {
+    int deviceDeg;
+    switch (deviceOrientation) {
+      case DeviceOrientation.portraitUp:    deviceDeg = 0;   break;
+      case DeviceOrientation.landscapeLeft: deviceDeg = 90;  break;
+      case DeviceOrientation.portraitDown:  deviceDeg = 180; break;
+      case DeviceOrientation.landscapeRight:deviceDeg = 270; break;
+    }
+    if (Platform.isIOS) return 0;
+    return (camera.sensorOrientation - deviceDeg + 360) % 360;
+  }
+
   InputImage? inputImageFromCameraImage(
     CameraImage image,
     CameraDescription camera,

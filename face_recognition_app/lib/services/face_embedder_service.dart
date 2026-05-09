@@ -87,6 +87,8 @@ class FaceEmbedderService {
       }
     }
 
+    // ignore: avoid_print
+    print('[Embed] bestSim=$bestSim name=$bestName threshold=$threshold');
     if (bestSim >= threshold) {
       return (name: bestName, similarity: bestSim);
     }

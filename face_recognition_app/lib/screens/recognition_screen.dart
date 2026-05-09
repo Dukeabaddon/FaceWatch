@@ -114,6 +114,8 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       final faces = await _detectorService.detectFacesWithContours(inputImage);
       // Swap W/H: sensor landscape 720x480, but display is portrait after 90deg rotation
       final sensorSize = Size(image.height.toDouble(), image.width.toDouble());
+      // Degrees to rotate raw sensor crop → upright face for MobileFaceNet
+      final rotDeg = _detectorService.getRotationDegrees(camera, _deviceOrientation);
 
       if (faces.isEmpty) {
         if (mounted) setState(() { _faces = []; _labels = []; _imageSize = sensorSize; });
@@ -132,13 +134,19 @@ class _RecognitionScreenState extends State<RecognitionScreen>
         if (fullImg != null) {
           for (final face in faces) {
             final box = face.boundingBox;
-            final faceImg = img.copyCrop(
-              fullImg,
-              x: box.left.toInt().clamp(0, fullImg.width - 1),
-              y: box.top.toInt().clamp(0, fullImg.height - 1),
-              width: box.width.toInt().clamp(1, fullImg.width),
-              height: box.height.toInt().clamp(1, fullImg.height),
-            );
+            // ML Kit bbox is in DISPLAY (rotated) space.
+            // _cameraImageToRgbImage gives RAW sensor landscape image.
+            // Must convert bbox from display space → raw sensor space before crop.
+            final rawBox = _displayBoxToSensorBox(box, fullImg.width, fullImg.height, rotDeg);
+            final x = rawBox.left.toInt().clamp(0, fullImg.width - 1);
+            final y = rawBox.top.toInt().clamp(0, fullImg.height - 1);
+            final w = rawBox.width.toInt().clamp(1, fullImg.width - x);
+            final h = rawBox.height.toInt().clamp(1, fullImg.height - y);
+            var faceImg = img.copyCrop(fullImg, x: x, y: y, width: w, height: h);
+            // Rotate crop upright so MobileFaceNet receives a frontal face
+            if (rotDeg != 0) {
+              faceImg = img.copyRotate(faceImg, angle: rotDeg.toDouble());
+            }
 
             final embedding = _embedderService.getEmbedding(faceImg);
             if (embedding != null) {
@@ -203,6 +211,30 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       if (hasVibrator) {
         Vibration.vibrate(duration: 200);
       }
+    }
+  }
+
+  /// Convert bbox from ML Kit display/rotated space back to raw sensor space.
+  /// rawW/rawH are the sensor image dimensions (e.g. 720x480).
+  /// rotDeg is the clockwise rotation applied by ML Kit (e.g. 270).
+  Rect _displayBoxToSensorBox(Rect displayBox, int rawW, int rawH, int rotDeg) {
+    // ML Kit applies rotation so the display coords are in portrait space.
+    // We need to reverse that to get raw landscape sensor coords.
+    final double l = displayBox.left;
+    final double t = displayBox.top;
+    final double r = displayBox.right;
+    final double b = displayBox.bottom;
+    switch (rotDeg) {
+      case 90:
+        // display(x,y) = sensor(y, rawW-x) → reverse: sensor_x=rawW-displayY, sensor_y=displayX
+        return Rect.fromLTRB(rawW - b, l, rawW - t, r);
+      case 180:
+        return Rect.fromLTRB(rawW - r, rawH - b, rawW - l, rawH - t);
+      case 270:
+        // display(x,y) = sensor(rawH-y, x) → reverse: sensor_x=displayY, sensor_y=rawH-displayX
+        return Rect.fromLTRB(t, rawH - r, b, rawH - l);
+      default: // 0
+        return displayBox;
     }
   }
 
