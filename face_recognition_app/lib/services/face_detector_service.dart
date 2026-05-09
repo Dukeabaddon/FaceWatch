@@ -1,6 +1,6 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' show Size;
+import 'package:flutter/foundation.dart' show WriteBuffer;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:camera/camera.dart';
 
@@ -72,32 +72,20 @@ class FaceDetectorService {
   }
 
   InputImage _buildNv21InputImage(CameraImage image, InputImageRotation rotation) {
-    // Concatenate YUV planes into NV21 byte array
-    final yPlane = image.planes[0];
-    final uPlane = image.planes[1];
-    final vPlane = image.planes[2];
-
-    final int ySize = yPlane.bytes.length;
-    final int uvSize = uPlane.bytes.length + vPlane.bytes.length;
-    final nv21 = List<int>.filled(ySize + uvSize, 0);
-
-    // Copy Y plane
-    nv21.setRange(0, ySize, yPlane.bytes);
-
-    // Interleave V and U (NV21 = Y + VU interleaved)
-    int offset = ySize;
-    for (int i = 0; i < vPlane.bytes.length; i++) {
-      nv21[offset++] = vPlane.bytes[i];
-      if (i < uPlane.bytes.length) nv21[offset++] = uPlane.bytes[i];
+    // Concat all YUV planes — official google_mlkit pattern for Android yuv420.
+    final WriteBuffer allBytes = WriteBuffer();
+    for (final plane in image.planes) {
+      allBytes.putUint8List(plane.bytes);
     }
+    final bytes = allBytes.done().buffer.asUint8List();
 
     return InputImage.fromBytes(
-      bytes: Uint8List.fromList(nv21),
+      bytes: bytes,
       metadata: InputImageMetadata(
         size: Size(image.width.toDouble(), image.height.toDouble()),
         rotation: rotation,
-        format: InputImageFormat.nv21,
-        bytesPerRow: yPlane.bytesPerRow,
+        format: InputImageFormat.yuv_420_888,
+        bytesPerRow: image.planes[0].bytesPerRow,
       ),
     );
   }
