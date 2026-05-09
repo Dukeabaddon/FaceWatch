@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -30,6 +29,7 @@ class _RegisterScreenState extends State<RegisterScreen>
   List<CameraDescription> _cameras = [];
   int _cameraIndex = 0;
   List<Face> _faces = [];
+  CameraImage? _lastCameraImage;
   Size _imageSize = Size.zero;
   bool _isProcessing = false;
   bool _cameraReady = false;
@@ -37,11 +37,6 @@ class _RegisterScreenState extends State<RegisterScreen>
   _FaceState _faceState = _FaceState.none;
   // ignore: prefer_final_fields
   DeviceOrientation _deviceOrientation = DeviceOrientation.portraitUp;
-
-  // Countdown hold-still auto-capture
-  int _holdCountdown = 0;
-  Timer? _holdTimer;
-  static const _holdSeconds = 3;
 
   late AnimationController _scanAnimController;
   late AnimationController _pulseController;
@@ -107,7 +102,6 @@ class _RegisterScreenState extends State<RegisterScreen>
 
   Future<void> _switchCamera() async {
     if (_cameras.length < 2 || _isSwitchingCamera) return;
-    _cancelHoldTimer();
     setState(() => _isSwitchingCamera = true);
     _cameraIndex = (_cameraIndex + 1) % _cameras.length;
     await _startCamera(_cameraIndex);
@@ -140,13 +134,8 @@ class _RegisterScreenState extends State<RegisterScreen>
         _faces = faces;
         _faceState = state;
         _imageSize = sensorSize;
+        if (faces.isNotEmpty) _lastCameraImage = image;
       });
-
-      if (state == _FaceState.good) {
-        _startHoldTimer();
-      } else {
-        _cancelHoldTimer();
-      }
     } finally {
       _isProcessing = false;
     }
@@ -193,29 +182,6 @@ class _RegisterScreenState extends State<RegisterScreen>
     return _FaceState.good;
   }
 
-  void _startHoldTimer() {
-    if (_holdTimer != null) return;
-    setState(() => _holdCountdown = _holdSeconds);
-    _holdTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!mounted) { t.cancel(); return; }
-      setState(() {
-        if (_holdCountdown > 0) _holdCountdown--;
-      });
-      if (_holdCountdown <= 0) {
-        t.cancel();
-        _holdTimer = null;
-        // No auto-capture: user must tap button
-      }
-    });
-  }
-
-  void _cancelHoldTimer() {
-    if (_holdTimer != null) {
-      _holdTimer!.cancel();
-      _holdTimer = null;
-      if (mounted) setState(() => _holdCountdown = 0);
-    }
-  }
 
   String get _statusText {
     switch (_faceState) {
@@ -230,9 +196,7 @@ class _RegisterScreenState extends State<RegisterScreen>
       case _FaceState.lowLight:
         return 'Too dark — find better lighting';
       case _FaceState.good:
-        return _holdCountdown > 0
-            ? 'Hold still... $_holdCountdown'
-            : 'Face locked';
+        return 'Face locked — tap to capture';
     }
   }
 
@@ -312,12 +276,20 @@ class _RegisterScreenState extends State<RegisterScreen>
     setState(() => _faceState = _FaceState.none);
 
     try {
-      final xFile = await _cameraController!.takePicture();
-      final bytes = await xFile.readAsBytes();
-      final fullImage = img.decodeImage(bytes);
+      // Crop from the live CameraImage frame — same coordinate space as ML Kit bounding box.
+      // Do NOT use takePicture() JPEG: it is full-res (e.g. 3264x2448) while ML Kit
+      // returns coords in stream space (720x480) → wrong crop → garbage embedding.
+      final rawFrame = _lastCameraImage;
+      if (rawFrame == null) {
+        _showError('No camera frame available');
+        _cameraController!.startImageStream(_onFrame);
+        return;
+      }
 
+      final fullImage = _cameraImageToRgbImage(rawFrame);
       if (fullImage == null) {
-        _showError('Failed to decode image');
+        _showError('Failed to decode camera frame');
+        _cameraController!.startImageStream(_onFrame);
         return;
       }
 
@@ -328,8 +300,8 @@ class _RegisterScreenState extends State<RegisterScreen>
         fullImage,
         x: box.left.toInt().clamp(0, fullImage.width - 1),
         y: box.top.toInt().clamp(0, fullImage.height - 1),
-        width: box.width.toInt().clamp(1, fullImage.width),
-        height: box.height.toInt().clamp(1, fullImage.height),
+        width: box.width.toInt().clamp(1, fullImage.width - box.left.toInt().clamp(0, fullImage.width - 1)),
+        height: box.height.toInt().clamp(1, fullImage.height - box.top.toInt().clamp(0, fullImage.height - 1)),
       );
 
       final embedding = _embedderService.getEmbedding(faceImg);
@@ -418,9 +390,52 @@ class _RegisterScreenState extends State<RegisterScreen>
     );
   }
 
+  img.Image? _cameraImageToRgbImage(CameraImage image) {
+    try {
+      if (Platform.isAndroid) {
+        final yPlane = image.planes[0];
+        final uPlane = image.planes[1];
+        final vPlane = image.planes[2];
+        final width = image.width;
+        final height = image.height;
+        final rgbImage = img.Image(width: width, height: height);
+        final uvPixelStride = uPlane.bytesPerPixel ?? 1;
+        for (int y = 0; y < height; y++) {
+          for (int x = 0; x < width; x++) {
+            final yVal = yPlane.bytes[y * yPlane.bytesPerRow + x] & 0xFF;
+            final uvRow = (y ~/ 2) * uPlane.bytesPerRow;
+            final uvCol = (x ~/ 2) * uvPixelStride;
+            final uVal = (uPlane.bytes[uvRow + uvCol] & 0xFF) - 128;
+            final vVal = (vPlane.bytes[(y ~/ 2) * vPlane.bytesPerRow + (x ~/ 2) * (vPlane.bytesPerPixel ?? 1)] & 0xFF) - 128;
+            final r = (yVal + 1.370705 * vVal).clamp(0, 255).toInt();
+            final g = (yVal - 0.337633 * uVal - 0.698001 * vVal).clamp(0, 255).toInt();
+            final b = (yVal + 1.732446 * uVal).clamp(0, 255).toInt();
+            rgbImage.setPixel(x, y, img.ColorRgb8(r, g, b));
+          }
+        }
+        return rgbImage;
+      } else {
+        final plane = image.planes[0];
+        final bytes = plane.bytes;
+        final width = image.width;
+        final height = image.height;
+        final rgbImage = img.Image(width: width, height: height);
+        for (int y = 0; y < height; y++) {
+          for (int x = 0; x < width; x++) {
+            final i = y * plane.bytesPerRow + x * 4;
+            if (i + 3 >= bytes.length) continue;
+            rgbImage.setPixel(x, y, img.ColorRgb8(bytes[i + 2], bytes[i + 1], bytes[i]));
+          }
+        }
+        return rgbImage;
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   void dispose() {
-    _holdTimer?.cancel();
     _scanAnimController.dispose();
     _pulseController.dispose();
     _cameraController?.stopImageStream();
@@ -495,24 +510,6 @@ class _RegisterScreenState extends State<RegisterScreen>
                           ),
                         ),
                       ),
-                      // Countdown overlay in center when holding
-                      if (isGood && _holdCountdown > 0)
-                        Center(
-                          child: AnimatedBuilder(
-                            animation: _pulseController,
-                            builder: (context, child) => Opacity(
-                              opacity: 0.7 + 0.3 * _pulseController.value,
-                              child: Text(
-                                '$_holdCountdown',
-                                style: const TextStyle(
-                                  color: Colors.greenAccent,
-                                  fontSize: 96,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
                     ],
                   )
                 : const Center(
@@ -548,21 +545,7 @@ class _RegisterScreenState extends State<RegisterScreen>
                     ],
                   ),
                   const SizedBox(height: 12),
-                  // Progress bar: fill as countdown ticks
-                  if (isGood)
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value: _holdCountdown > 0
-                            ? (_holdSeconds - _holdCountdown) / _holdSeconds
-                            : 1.0,
-                        backgroundColor: Colors.white12,
-                        valueColor: AlwaysStoppedAnimation(_stateColor),
-                        minHeight: 4,
-                      ),
-                    ),
-                  if (isGood) const SizedBox(height: 12),
-                  // Manual capture button — shown but auto-triggers too
+                  // Capture button — active only when face is good
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton(
@@ -577,9 +560,7 @@ class _RegisterScreenState extends State<RegisterScreen>
                         ),
                       ),
                       child: Text(
-                        isGood && _holdCountdown > 0
-                            ? 'Face Ready — Tap to Capture ($_holdCountdown)'
-                            : 'Capture & Register',
+                        isGood ? 'Capture & Register' : 'Align face to enable',
                         style: const TextStyle(
                             fontWeight: FontWeight.bold, fontSize: 14),
                       ),

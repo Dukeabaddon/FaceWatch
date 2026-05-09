@@ -146,6 +146,11 @@ class _RecognitionScreenState extends State<RecognitionScreen>
                 embedding,
                 knownFaces,
               );
+              if (match != null) {
+                debugPrint('[Recognize] MATCH: ${match.name} sim=${match.similarity.toStringAsFixed(3)}');
+              } else {
+                debugPrint('[Recognize] NO MATCH (best below threshold)');
+              }
               labels.add(match != null
                   ? '${match.name} ${(match.similarity * 100).toStringAsFixed(0)}%'
                   : 'Unknown');
